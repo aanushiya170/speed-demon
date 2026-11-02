@@ -16,6 +16,7 @@
 //     bitmap instead of settling the whole graph.
 #include <fcntl.h>
 #include <immintrin.h>
+#include <malloc.h>
 #include <sched.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -205,14 +206,25 @@ template <class K> struct Search {
   }
 };
 
-int main() {
+int main(int argc, char **argv) {
+  mallopt(-8, 2);
+  std::string data_dir = "/data";
+  std::string out_dir = "/out";
+  for (int i = 1; i < argc; ++i) {
+    if (std::string(argv[i]) == "--data" && i + 1 < argc) data_dir = argv[++i];
+    else if (std::string(argv[i]) == "--out" && i + 1 < argc) out_dir = argv[++i];
+  }
+
   cpu_set_t set;
   sched_getaffinity(0, sizeof set, &set);
   int T = std::max(1, std::min(CPU_COUNT(&set), 32));
 
   // ---------------- parse graph.txt ----------------
   size_t gsize;
-  const u8 *g = map_file("/data/graph.txt", &gsize);
+  std::string graph_path = data_dir + "/graph.txt";
+  std::string queries_path = data_dir + "/queries.txt";
+  std::string out_path = out_dir + "/distances.txt";
+  const u8 *g = map_file(graph_path.c_str(), &gsize);
   const u8 *p = g;
   size_t n = digits<' '>(p), m = digits<'\n'>(p);
   std::vector<const u8 *> cut(T + 1, g + gsize);
@@ -368,7 +380,7 @@ int main() {
 
   // ---------------- queries ----------------
   size_t qsize;
-  const u8 *qf = map_file("/data/queries.txt", &qsize);
+  const u8 *qf = map_file(queries_path.c_str(), &qsize);
   size_t Q = count_newlines(qf, qf + qsize);
   std::vector<u32> qs(Q), qt(Q);
   const u8 *q = qf;
@@ -397,7 +409,7 @@ int main() {
   char *o = out.data();
   for (size_t i = 0; i < Q; ++i)
     o += sprintf(o, "%lld\n", (long long)ans[i]);
-  int fd = open("/out/distances.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  int fd = open(out_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
   if (write(fd, out.data(), o - out.data()) < 0)
     return 1;
   return 0;

@@ -171,8 +171,8 @@ int main(int argc, char **argv) {
   std::string out_path = out_dir + "/aggregates.txt";
   const u8 *reg = map_file(reg_path.c_str(), &rsize);
   const u8 *rec = map_file(rec_path.c_str(), &size);
-  u16 *lut = (u16 *)mmap(nullptr, LUT_SIZE * 2, PROT_READ | PROT_WRITE,
-                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  u16 *lut =
+      (u16 *)calloc(LUT_SIZE, 2); // country code + 1, 0 = not in the table
   std::vector<u8> present(CODES, 0);
   const u8 *body = (const u8 *)memchr(reg, '\n', rsize) + 1;
   std::vector<const u8 *> rcut(threads + 1, reg + rsize);
@@ -213,10 +213,9 @@ int main(int argc, char **argv) {
       ++q;
     cut[i] = q ? q + 1 : rec + size;
   }
-  u64 *names = (u64 *)mmap(nullptr, (1u << NAME_BITS) * 8, PROT_READ | PROT_WRITE,
-                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  u64 *seen = (u64 *)mmap(nullptr, (nc << (NAME_BITS - 6)) * 8, PROT_READ | PROT_WRITE,
-                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  u64 *names = (u64 *)calloc(1u << NAME_BITS, 8);
+  u64 *seen = (u64 *)calloc(nc << (NAME_BITS - 6),
+                            8); // per country, one bit per name slot
   std::vector<std::vector<Agg>> agg(threads, std::vector<Agg>(nc));
   parallel_for(threads, threads, [&](int i) {
     std::vector<Agg> &A = agg[i];

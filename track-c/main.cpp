@@ -12,6 +12,7 @@
 //   bytes, and the table slot index is the bit set in the country's bitmap.
 #include <fcntl.h>
 #include <immintrin.h>
+#include <malloc.h>
 #include <sched.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -150,17 +151,28 @@ static const u8 *map_file(const char *path, size_t *size) {
   return base;
 }
 
-int main() {
+int main(int argc, char **argv) {
+  mallopt(-8, 2);
+  std::string data_dir = "/data";
+  std::string out_dir = "/out";
+  for (int i = 1; i < argc; ++i) {
+    if (std::string(argv[i]) == "--data" && i + 1 < argc) data_dir = argv[++i];
+    else if (std::string(argv[i]) == "--out" && i + 1 < argc) out_dir = argv[++i];
+  }
+
   cpu_set_t set;
   sched_getaffinity(0, sizeof set, &set);
   int threads = std::max(1, std::min(CPU_COUNT(&set), 32));
 
   // ---- regions.csv: "region_id,country" lines, ids ascending ----
   size_t rsize, size;
-  const u8 *reg = map_file("/data/regions.csv", &rsize);
-  const u8 *rec = map_file("/data/records.csv", &size);
-  u16 *lut =
-      (u16 *)calloc(LUT_SIZE, 2); // country code + 1, 0 = not in the table
+  std::string reg_path = data_dir + "/regions.csv";
+  std::string rec_path = data_dir + "/records.csv";
+  std::string out_path = out_dir + "/aggregates.txt";
+  const u8 *reg = map_file(reg_path.c_str(), &rsize);
+  const u8 *rec = map_file(rec_path.c_str(), &size);
+  u8 *lut = (u8 *)mmap(nullptr, LUT_SIZE, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   std::vector<u8> present(CODES, 0);
   const u8 *body = (const u8 *)memchr(reg, '\n', rsize) + 1;
   std::vector<const u8 *> rcut(threads + 1, reg + rsize);
@@ -171,11 +183,12 @@ int main() {
     q = (const u8 *)memchr(q, '\n', reg + rsize - q);
     rcut[i] = q ? q + 1 : reg + rsize;
   }
+  // Pass 1: find all distinct country codes from regions.csv
   parallel_for(threads, threads, [&](int i) {
     for (const u8 *p = rcut[i]; p < rcut[i + 1];) {
-      u64 id = digits<','>(p);
+      while (*p != ',') ++p;
+      ++p;
       int code = (p[0] - 'A') * 676 + (p[1] - 'A') * 26 + (p[2] - 'A');
-      lut[id] = code + 1;
       present[code] = 1;
       p += 4;
     }
@@ -190,6 +203,16 @@ int main() {
     }
   size_t nc = codes.size() +
               1; // index 0 is _UNMATCHED; codes are in sorted order after it
+
+  // Pass 2: fill 1-byte lut with direct country index
+  parallel_for(threads, threads, [&](int i) {
+    for (const u8 *p = rcut[i]; p < rcut[i + 1];) {
+      u64 id = digits<','>(p);
+      int code = (p[0] - 'A') * 676 + (p[1] - 'A') * 26 + (p[2] - 'A');
+      lut[id] = compact[code + 1];
+      p += 4;
+    }
+  });
 
   // ---- records.csv: split at "LF + digit" or "LF + BOM" ----
   std::vector<const u8 *> cut(threads + 1, rec + size);
@@ -218,7 +241,7 @@ int main() {
     auto flush = [&] {
       for (int k = 0; k < np; ++k) {
         Pending &q = pend[k];
-        size_t c = q.region < LUT_SIZE ? compact[lut[q.region]] : 0;
+        size_t c = q.region < LUT_SIZE ? lut[q.region] : 0;
         q.country = c;
         Agg &a = A[c];
         ++a.count;
@@ -315,7 +338,7 @@ int main() {
                  (unsigned long long)t.name_bytes,
                  (unsigned long long)t.note_bytes);
   }
-  int fd = open("/out/aggregates.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  int fd = open(out_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
   if (write(fd, out.data(), o - out.data()) < 0)
     return 1;
   return 0;

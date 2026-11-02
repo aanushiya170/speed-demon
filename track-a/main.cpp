@@ -13,6 +13,7 @@
 //      group with nth_element, formatted into per-hour buffers and pwritten.
 #include <fcntl.h>
 #include <immintrin.h>
+#include <malloc.h>
 #include <sched.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -80,16 +81,20 @@ static inline u64 mix(u64 a, u64 b) {
   return (u64)r ^ (u64)(r >> 64);
 }
 
-// Hash of the endpoint bytes; may read up to 7 bytes past the end (the file
-// mapping is padded).
+// Hash of the endpoint bytes with hardware CRC32
 static inline u64 hash_bytes(const u8 *p, u32 len) {
-  u64 h = 0x9E3779B97F4A7C15ull ^ len;
+  u64 crc = 0;
   u32 n = len;
-  for (; n > 8; n -= 8, p += 8)
-    h = mix(h ^ load64(p), 0xD6E8FEB86659FD93ull);
-  u64 last = load64(p) & (n == 8 ? ~0ull : ((1ull << (8 * n)) - 1));
-  h = mix(h ^ last, 0xA0761D6478BD642Full);
-  return h ? h : 1;
+  while (n >= 8) {
+    crc = _mm_crc32_u64(crc, load64(p));
+    p += 8;
+    n -= 8;
+  }
+  if (n) {
+    u64 last = load64(p) & ((1ull << (8 * n)) - 1);
+    crc = _mm_crc32_u64(crc, last);
+  }
+  return crc ? crc : 1;
 }
 
 // Interns an endpoint and returns its local id. Equality is decided by the
@@ -194,9 +199,19 @@ static char *put(char *o, u64 v) {
   return o;
 }
 
-int main() {
+int main(int argc, char **argv) {
+  mallopt(-8, 2);
+  std::string data_dir = "/data";
+  std::string out_dir = "/out";
+  for (int i = 1; i < argc; ++i) {
+    if (std::string(argv[i]) == "--data" && i + 1 < argc) data_dir = argv[++i];
+    else if (std::string(argv[i]) == "--out" && i + 1 < argc) out_dir = argv[++i];
+  }
+
   int threads = hardware_threads();
-  int fd = open("/data/requests.log", O_RDONLY);
+  std::string log_path = data_dir + "/requests.log";
+  std::string out_path = out_dir + "/summary.txt";
+  int fd = open(log_path.c_str(), O_RDONLY);
   struct stat st;
   fstat(fd, &st);
   size_t size = st.st_size;
@@ -321,7 +336,7 @@ int main() {
     blen[h] = o - o0;
   });
 
-  int out = open("/out/summary.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  int out = open(out_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
   std::vector<size_t> off(HOURS + 1);
   for (int h = 0; h < HOURS; ++h)
     off[h + 1] = off[h] + blen[h];

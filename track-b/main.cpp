@@ -14,6 +14,7 @@
 // only the few surviving candidate documents to check adjacency.
 #include <fcntl.h>
 #include <immintrin.h>
+#include <malloc.h>
 #include <sched.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -249,12 +250,31 @@ struct Eval {
               *e++ = a.l[i];
           }
         } else {
-          e = std::set_intersection(R.l, R.l + R.len, S.l, S.l + S.len, ol);
+          const u32 *p1 = R.l, *e1 = R.l + R.len;
+          const u32 *p2 = S.l, *e2 = S.l + S.len;
+          u32 *out = ol;
+          while (p1 < e1 && p2 < e2) {
+            u32 v1 = *p1, v2 = *p2;
+            if (v1 == v2) *out++ = v1;
+            p1 += (v1 <= v2);
+            p2 += (v2 <= v1);
+          }
+          e = out;
         }
       } else if (op == OR) {
         e = std::set_union(R.l, R.l + R.len, S.l, S.l + S.len, ol);
       } else {
-        e = std::set_difference(R.l, R.l + R.len, S.l, S.l + S.len, ol);
+        const u32 *p1 = R.l, *e1 = R.l + R.len;
+        const u32 *p2 = S.l, *e2 = S.l + S.len;
+        u32 *out = ol;
+        while (p1 < e1 && p2 < e2) {
+          u32 v1 = *p1, v2 = *p2;
+          if (v1 < v2) *out++ = v1;
+          p1 += (v1 <= v2);
+          p2 += (v2 <= v1);
+        }
+        while (p1 < e1) *out++ = *p1++;
+        e = out;
       }
       out.l = ol, out.len = e - ol;
     } else if (!R.b) { // R list, S bitmap
@@ -442,15 +462,26 @@ struct Eval {
 
 // ---------------------------------------------------------------- main
 
-int main() {
+int main(int argc, char **argv) {
+  mallopt(-8, 2);
+  std::string data_dir = "/data";
+  std::string out_dir = "/out";
+  for (int i = 1; i < argc; ++i) {
+    if (std::string(argv[i]) == "--data" && i + 1 < argc) data_dir = argv[++i];
+    else if (std::string(argv[i]) == "--out" && i + 1 < argc) out_dir = argv[++i];
+  }
+
   cpu_set_t set;
   sched_getaffinity(0, sizeof set, &set);
   int T = std::max(1, std::min(CPU_COUNT(&set), 32));
 
   // ---- queries -> term dictionary ----
   size_t qsize, dsize;
-  const u8 *qf = map_file("/data/queries.txt", &qsize);
-  ix.docs = map_file("/data/docs.txt", &dsize);
+  std::string q_path = data_dir + "/queries.txt";
+  std::string d_path = data_dir + "/docs.txt";
+  std::string out_path = out_dir + "/results.txt";
+  const u8 *qf = map_file(q_path.c_str(), &qsize);
+  ix.docs = map_file(d_path.c_str(), &dsize);
   table = (Entry *)calloc(1u << TERM_BITS, sizeof(Entry));
   auto word = [](const u8 *&p) { // a run of term/operator bytes
     const u8 *s = p;
@@ -683,7 +714,7 @@ int main() {
     for (size_t i = b * block; i < std::min(Q, (size_t)(b + 1) * block); ++i)
       ev.run(queries[i], res[b]);
   });
-  int fd = open("/out/results.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  int fd = open(out_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
   for (auto &r : res)
     if (write(fd, r.data(), r.size()) < 0)
       return 1;

@@ -591,6 +591,10 @@ int main(int argc, char **argv) {
   // document a run of ids belongs to (documents are processed in order).
   std::vector<u32 *> tids(T, nullptr);
   std::vector<size_t> npairs(T, 0), cap(T, 0);
+  for (int i = 0; i < T; ++i) {
+    cap[i] = 1000000;
+    tids[i] = (u32 *)malloc(cap[i] * sizeof(u32));
+  }
   std::vector<u32> first_doc(T, 0), ndocs(T, 0);
   u32 *doccnt = (u32 *)malloc(ix.N * 4);
   parallel_for(T, T, [&](int i) {
@@ -694,6 +698,8 @@ int main(int argc, char **argv) {
     free(slots[i]);
   });
   free(doccnt);
+  madvise((void *)ix.docs, dsize, MADV_DONTNEED);
+  malloc_trim(0);
   // frequency of bitmap terms (used to order phrase intersections)
   parallel_for((int)rows + 1, T, [&](int r) {
     if (r == (int)rows)

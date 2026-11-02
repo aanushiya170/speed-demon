@@ -76,6 +76,17 @@ static inline u64 load64(const u8 *p) {
   memcpy(&v, p, 8);
   return v;
 }
+
+static inline size_t count_newlines(const u8 *p, const u8 *end) {
+  size_t c = 0;
+  const __m256i nl = _mm256_set1_epi8('\n');
+  for (; p + 32 <= end; p += 32)
+    c += __builtin_popcount(_mm256_movemask_epi8(
+        _mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i *)p), nl)));
+  for (; p < end; ++p)
+    c += *p == '\n';
+  return c;
+}
 static inline u64 mix(u64 a, u64 b) {
   __uint128_t r = (__uint128_t)a * b;
   return (u64)r ^ (u64)(r >> 64);
@@ -236,10 +247,9 @@ int main(int argc, char **argv) {
   parallel_for(W, threads, [&](int i) {
     Worker &w = workers[i];
     size_t bytes = cut[i + 1] - cut[i];
-    // shortest possible line is 40 bytes; untouched capacity costs no memory
-    w.recs = (Rec *)malloc((bytes / 40 + 16) * sizeof(Rec));
-    madvise(base + (cut[i] & ~4095ull), bytes + 4096,
-            22 /* MADV_POPULATE_READ */);
+    size_t lines = count_newlines(base + cut[i], base + cut[i + 1]);
+    w.recs = (Rec *)malloc((lines + 1) * sizeof(Rec));
+    madvise(base + (cut[i] & ~4095ull), bytes + 4096, MADV_SEQUENTIAL);
     parse(base + cut[i], base + cut[i + 1], w);
   });
 

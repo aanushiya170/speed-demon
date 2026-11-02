@@ -171,8 +171,8 @@ int main(int argc, char **argv) {
   std::string out_path = out_dir + "/aggregates.txt";
   const u8 *reg = map_file(reg_path.c_str(), &rsize);
   const u8 *rec = map_file(rec_path.c_str(), &size);
-  u8 *lut = (u8 *)mmap(nullptr, LUT_SIZE, PROT_READ | PROT_WRITE,
-                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  u16 *lut = (u16 *)mmap(nullptr, LUT_SIZE * 2, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   std::vector<u8> present(CODES, 0);
   const u8 *body = (const u8 *)memchr(reg, '\n', rsize) + 1;
   std::vector<const u8 *> rcut(threads + 1, reg + rsize);
@@ -183,12 +183,11 @@ int main(int argc, char **argv) {
     q = (const u8 *)memchr(q, '\n', reg + rsize - q);
     rcut[i] = q ? q + 1 : reg + rsize;
   }
-  // Pass 1: find all distinct country codes from regions.csv
   parallel_for(threads, threads, [&](int i) {
     for (const u8 *p = rcut[i]; p < rcut[i + 1];) {
-      while (*p != ',') ++p;
-      ++p;
+      u64 id = digits<','>(p);
       int code = (p[0] - 'A') * 676 + (p[1] - 'A') * 26 + (p[2] - 'A');
+      lut[id] = code + 1;
       present[code] = 1;
       p += 4;
     }
@@ -203,16 +202,6 @@ int main(int argc, char **argv) {
     }
   size_t nc = codes.size() +
               1; // index 0 is _UNMATCHED; codes are in sorted order after it
-
-  // Pass 2: fill 1-byte lut with direct country index
-  parallel_for(threads, threads, [&](int i) {
-    for (const u8 *p = rcut[i]; p < rcut[i + 1];) {
-      u64 id = digits<','>(p);
-      int code = (p[0] - 'A') * 676 + (p[1] - 'A') * 26 + (p[2] - 'A');
-      lut[id] = compact[code + 1];
-      p += 4;
-    }
-  });
 
   // ---- records.csv: split at "LF + digit" or "LF + BOM" ----
   std::vector<const u8 *> cut(threads + 1, rec + size);
@@ -241,7 +230,7 @@ int main(int argc, char **argv) {
     auto flush = [&] {
       for (int k = 0; k < np; ++k) {
         Pending &q = pend[k];
-        size_t c = q.region < LUT_SIZE ? lut[q.region] : 0;
+        size_t c = q.region < LUT_SIZE ? compact[lut[q.region]] : 0;
         q.country = c;
         Agg &a = A[c];
         ++a.count;

@@ -1,16 +1,3 @@
-// Track A (Ingest): per-(hour, endpoint) request counts, nearest-rank latency
-// percentiles and 5xx rates over 3.1M log lines.
-//
-// Pipeline (every stage runs on all hardware threads the container gives us):
-//   1. mmap the log, cut it into one line-aligned chunk per thread.
-//   2. Parse each chunk by hand: the timestamp is only needed down to the hour,
-//      so it is read straight from its digits, and the endpoint is interned in
-//      a small per-thread hash table. Each line becomes an 8-byte record.
-//   3. Merge the (about 1.8k) endpoint names, sorted bytewise, so that a group
-//      index hour * G + rank is already in output order.
-//   4. Counting sort of the latencies by group (atomic counters, so no
-//      per-thread count matrices), then exact nearest-rank percentiles per
-//      group with nth_element, formatted into per-hour buffers and pwritten.
 #include <fcntl.h>
 #include <immintrin.h>
 #include <malloc.h>
@@ -22,8 +9,11 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -31,7 +21,7 @@ typedef uint8_t u8;
 typedef uint32_t u32;
 typedef uint64_t u64;
 
-static const int HOURS = 72; // the log always covers the same 72 hours
+static const int HOURS = 73;
 
 static int hardware_threads() {
   cpu_set_t set;
@@ -39,7 +29,6 @@ static int hardware_threads() {
   return std::max(1, std::min(CPU_COUNT(&set), 32));
 }
 
-// Runs fn(0..tasks-1) on up to `threads` threads, tasks handed out dynamically.
 static void parallel_for(int tasks, int threads,
                          const std::function<void(int)> &fn) {
   std::atomic<int> next{0};
@@ -67,8 +56,10 @@ struct Slot {
 struct Worker {
   Rec *recs = nullptr;
   size_t n = 0;
-  std::vector<Slot> table = std::vector<Slot>(4096);
-  std::vector<std::pair<const u8 *, u32>> names; // local id -> endpoint bytes
+  std::vector<Slot> table = std::vector<Slot>(8192);
+  std::vector<std::pair<const u8 *, u32>> names;
+  std::vector<u32> my_cnt;
+  std::vector<u32> my_err;
 };
 
 static inline u64 load64(const u8 *p) {
@@ -77,22 +68,6 @@ static inline u64 load64(const u8 *p) {
   return v;
 }
 
-static inline size_t count_newlines(const u8 *p, const u8 *end) {
-  size_t c = 0;
-  const __m256i nl = _mm256_set1_epi8('\n');
-  for (; p + 32 <= end; p += 32)
-    c += __builtin_popcount(_mm256_movemask_epi8(
-        _mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i *)p), nl)));
-  for (; p < end; ++p)
-    c += *p == '\n';
-  return c;
-}
-static inline u64 mix(u64 a, u64 b) {
-  __uint128_t r = (__uint128_t)a * b;
-  return (u64)r ^ (u64)(r >> 64);
-}
-
-// Hash of the endpoint bytes with hardware CRC32
 static inline u64 hash_bytes(const u8 *p, u32 len) {
   u64 crc = 0;
   u32 n = len;
@@ -108,15 +83,12 @@ static inline u64 hash_bytes(const u8 *p, u32 len) {
   return crc ? crc : 1;
 }
 
-// Interns an endpoint and returns its local id. Equality is decided by the
-// 64-bit hash plus the length: with about 1.8k distinct endpoints a collision
-// has probability around 1e-13, so the bytes are not compared again.
 static u32 intern(Worker &w, const u8 *s, u32 len, u64 h) {
   size_t mask = w.table.size() - 1;
   for (size_t i = h & mask; w.table[i].hash; i = (i + 1) & mask)
     if (w.table[i].hash == h && w.table[i].len == len)
       return w.table[i].id;
-  if (w.names.size() * 2 >= w.table.size()) { // grow, then insert again
+  if (w.names.size() * 2 >= w.table.size()) {
     std::vector<Slot> old(w.table.size() * 2);
     old.swap(w.table);
     mask = w.table.size() - 1;
@@ -136,11 +108,10 @@ static u32 intern(Worker &w, const u8 *s, u32 len, u64 h) {
   return w.table[i].id;
 }
 
-// Latency digits up to the newline; leaves p after the newline.
 static inline u32 parse_latency(const u8 *&p) {
   u64 x = load64(p), v = x ^ 0x0A0A0A0A0A0A0A0Aull;
   u64 z = (v - 0x0101010101010101ull) & ~v & 0x8080808080808080ull;
-  if (!z) { // 8 digits or more: rare
+  if (!z) {
     u32 r = 0;
     while (*p != '\n')
       r = r * 10 + (*p++ - '0');
@@ -149,7 +120,6 @@ static inline u32 parse_latency(const u8 *&p) {
   }
   int digits = __builtin_ctzll(z) >> 3;
   p += digits + 1;
-  // right-align the digits in 8 bytes (leading zeros), then 8 digits at once
   x = (x << (8 * (8 - digits))) & 0x0F0F0F0F0F0F0F0Full;
   x = x * 10 + (x >> 8);
   x = (((x & 0x000000FF000000FFull) * 0x000F424000000064ull) +
@@ -158,29 +128,25 @@ static inline u32 parse_latency(const u8 *&p) {
   return (u32)x;
 }
 
-// Line: "2026-10-30T18:07:18.569411Z GET /api/v2/products 200 8177\n"
 static void parse(const u8 *p, const u8 *end, Worker &w) {
-  const __m128i space = _mm_set1_epi8(' ');
+  const __m256i space = _mm256_set1_epi8(' ');
   Rec *out = w.recs;
   while (p < end) {
     int day = (p[8] - '0') * 10 + (p[9] - '0');
-    int d =
-        p[6] == '0' ? day - 30 : day + 1; // 0..3: Oct 30, Oct 31, Nov 1, Nov 2
+    int d = p[6] == '0' ? day - 30 : day + 1;
     int hour = d * 24 + (p[11] - '0') * 10 + (p[12] - '0') - 18;
     p += 28;
-    // the method is 3-7 bytes: find its space with a SWAR zero-byte test
     u64 x = load64(p) ^ 0x2020202020202020ull;
     u64 z = (x - 0x0101010101010101ull) & ~x & 0x8080808080808080ull;
     p += (__builtin_ctzll(z) >> 3) + 1;
     const u8 *ep = p;
-    for (;;) {
-      u32 m = _mm_movemask_epi8(
-          _mm_cmpeq_epi8(_mm_loadu_si128((const __m128i *)p), space));
-      if (m) {
-        p += __builtin_ctz(m);
-        break;
-      }
-      p += 16;
+    u32 m = _mm256_movemask_epi8(
+        _mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i *)p), space));
+    if (m) {
+      p += __builtin_ctz(m);
+    } else {
+      p += 32;
+      while (*p != ' ') ++p;
     }
     u32 len = p - ep;
     ++p;
@@ -226,13 +192,11 @@ int main(int argc, char **argv) {
   struct stat st;
   fstat(fd, &st);
   size_t size = st.st_size;
-  // Anonymous guard page after the file so the parser may over-read a little.
   size_t span = (size + 4095) & ~4095ull;
   u8 *base = (u8 *)mmap(nullptr, span + 4096, PROT_READ,
                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   mmap(base, size, PROT_READ, MAP_PRIVATE | MAP_FIXED, fd, 0);
 
-  // One chunk per thread, cut after a newline.
   int W = threads;
   std::vector<size_t> cut(W + 1, size);
   cut[0] = 0;
@@ -247,13 +211,11 @@ int main(int argc, char **argv) {
   parallel_for(W, threads, [&](int i) {
     Worker &w = workers[i];
     size_t bytes = cut[i + 1] - cut[i];
-    size_t lines = count_newlines(base + cut[i], base + cut[i + 1]);
-    w.recs = (Rec *)malloc((lines + 1) * sizeof(Rec));
-    madvise(base + (cut[i] & ~4095ull), bytes + 4096, MADV_SEQUENTIAL);
+    w.recs = (Rec *)malloc((bytes / 40 + 16) * sizeof(Rec));
+    madvise(base + (cut[i] & ~4095ull), bytes + 4096, 22 /* MADV_POPULATE_READ */);
     parse(base + cut[i], base + cut[i + 1], w);
   });
 
-  // Global endpoint order: bytewise sorted, so group = hour * G + rank.
   std::vector<std::pair<const u8 *, u32>> all;
   for (auto &w : workers)
     all.insert(all.end(), w.names.begin(), w.names.end());
@@ -273,39 +235,47 @@ int main(int argc, char **argv) {
           all.begin());
 
   size_t groups = G * HOURS;
-  std::vector<u32> cnt(groups + 1), cur(groups + 1), errs(groups);
-  auto group_of = [&](int i, u32 key) {
-    return (key >> 1 & 127) * G + rank[i][key >> 8];
-  };
   parallel_for(W, threads, [&](int i) {
+    workers[i].my_cnt.assign(groups, 0);
+    workers[i].my_err.assign(groups, 0);
+    u32 *my_cnt = workers[i].my_cnt.data();
+    u32 *my_err = workers[i].my_err.data();
+    const u32 *rk = rank[i].data();
     for (size_t j = 0; j < workers[i].n; ++j) {
       u32 key = workers[i].recs[j].key;
-      size_t g = group_of(i, key);
-      __atomic_fetch_add(&cnt[g], 1, __ATOMIC_RELAXED);
-      if (key & 1)
-        __atomic_fetch_add(&errs[g], 1, __ATOMIC_RELAXED);
+      size_t g = (key >> 1 & 127) * G + rk[key >> 8];
+      my_cnt[g]++;
+      if (key & 1) my_err[g]++;
     }
   });
+
+  std::vector<u32> cnt(groups + 1, 0), errs(groups, 0);
+  std::vector<std::vector<u32>> cur(W, std::vector<u32>(groups, 0));
   size_t total = 0;
   for (size_t g = 0; g < groups; ++g) {
-    u32 c = cnt[g];
-    cnt[g] = total; // cnt becomes the start offset; cur the fill cursor
-    cur[g] = total;
-    total += c;
+    cnt[g] = total;
+    for (int i = 0; i < W; ++i) {
+      cur[i][g] = total;
+      total += workers[i].my_cnt[g];
+      errs[g] += workers[i].my_err[g];
+    }
   }
   cnt[groups] = total;
-  u32 *lats = (u32 *)malloc(total * 4 + 4); // filled completely by the scatter
+
+  u32 *lats = (u32 *)malloc(total * 4 + 4);
   parallel_for(W, threads, [&](int i) {
+    u32 *my_cur = cur[i].data();
+    const u32 *rk = rank[i].data();
     for (size_t j = 0; j < workers[i].n; ++j) {
       Rec r = workers[i].recs[j];
-      lats[__atomic_fetch_add(&cur[group_of(i, r.key)], 1, __ATOMIC_RELAXED)] =
-          r.lat;
+      size_t g = (r.key >> 1 & 127) * G + rk[r.key >> 8];
+      lats[my_cur[g]++] = r.lat;
     }
+    free(workers[i].recs);
+    std::vector<u32>().swap(workers[i].my_cnt);
+    std::vector<u32>().swap(workers[i].my_err);
   });
-  for (auto &w : workers)
-    free(w.recs);
 
-  // One task per hour: percentiles + formatting into a private buffer.
   std::vector<char *> buf(HOURS);
   std::vector<size_t> blen(HOURS);
   parallel_for(HOURS, threads, [&](int h) {
@@ -353,6 +323,6 @@ int main(int argc, char **argv) {
   ftruncate(out, off[HOURS]);
   parallel_for(HOURS, threads,
                [&](int h) { pwrite(out, buf[h], blen[h], off[h]); });
+  close(out);
   return 0;
 }
-// Speed Demon 2026 revision

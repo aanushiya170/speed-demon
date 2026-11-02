@@ -20,3 +20,4 @@ Dropped / not done:
 - Sorting terms by band in the table: no measurable gain.
 
 Verification: `results.txt` hash `f86973c2...` equals the published seed-1 value; also checked against the Python reference for tiny seeds 1-3 and sample seeds 2-3, and with 2, 3, 5, 7, 12, 16 and 32 threads.
+# Speed Demon 2026 revision

@@ -7,3 +7,4 @@ Each query is a forward Dijkstra with a radix heap that stops when the target is
 **Dependencies:** none (no graph library; the heap is hand-written).
 
 **With another 24 hours:** a parallel BFS or a cheaper locality ordering, a bucket queue for the small main-body weights, and a leaner first CSR (the random scatter is the largest build cost).
+# Speed Demon 2026 revision

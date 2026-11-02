@@ -9,3 +9,4 @@
 **Relies on the spec:** digit-free names and notes, region ids below 10 million, at most ~130k distinct names, at most 255 countries (`compact` table), a CRLF-or-LF terminator after every record.
 
 **With another 24 hours:** speed up the quote scan for short names, and measure the pipeline batch size on the real box.
+# Speed Demon 2026 revision

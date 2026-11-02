@@ -11,3 +11,4 @@ A small sample of documents decides which terms are frequent: those get a bitmap
 **Known trade-offs.** Terms are identified by a 64-bit hash (about 1e-9 collision risk against the ~600k vocabulary); the distinct-term table is sized for ~130k terms.
 
 **With another 24 hours:** a cheaper bitmap/list decision without sampling, trimming the 112 MB peak further (the posting array and the term-id stream coexist during the scatter), and PGO.
+# Speed Demon 2026 revision

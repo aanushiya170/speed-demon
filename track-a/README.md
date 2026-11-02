@@ -9,3 +9,4 @@ Endpoint names from all threads are merged and sorted bytewise once (about 1.8k 
 **Known trade-offs.** Endpoint equality is decided by a 64-bit hash plus length; with ~1.8k endpoints the collision probability is about 1e-13.
 
 **With another 24 hours:** partition records by hour first (cache-friendlier grouping), profile on the real box, and try PGO on generator output.
+# Speed Demon 2026 revision

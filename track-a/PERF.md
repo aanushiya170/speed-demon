@@ -17,3 +17,4 @@ Things tried or considered and dropped:
 - Reading with `read()` into per-thread buffers instead of mmap: same cost, more memory.
 
 Verification: output hash `495ca096...` equals the published seed-1 value; also checked against the Python reference on tiny and sample scales for seeds 1-3, and with 2, 3, 5, 7, 12, 16 and 32 threads.
+# Speed Demon 2026 revision

@@ -6,3 +6,4 @@ RUN g++ -O3 -std=c++20 -march=x86-64-v3 -mtune=alderlake -static -pthread -o /sr
 FROM debian:13-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
 COPY --from=build /src/solution /app/solution
 ENTRYPOINT ["/app/solution"]
+# Speed Demon 2026 revision

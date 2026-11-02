@@ -11,3 +11,4 @@ All four reproduce the published seed-1 output hashes, and match the Python refe
 1. Push to the `speed-demon` branch with the Speed Demon Board app installed; copy the board run IDs into the last column of each `PERF.md`.
 2. Submit the team form with the repo URL and all four tracks.
 3. Make the repo public under an OSI licence (MIT is already here) within one hour after freeze.
+# Speed Demon 2026 revision

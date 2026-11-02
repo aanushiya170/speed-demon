@@ -20,3 +20,4 @@ Decisions:
 Tried and not kept: prefetching `dist` for all neighbours of a node before relaxing (no measurable change); bidirectional search (about half the settles, but needs a reverse CSR: +47 MB and a second build; estimated net gain too small).
 
 Verification: `distances.txt` hash `a23dbdf0...` equals the published seed-1 value; tiny seeds 1-3 and sample seeds 2-3 match the Python reference, with 2-32 threads.
+# Speed Demon 2026 revision

@@ -330,3 +330,4 @@ int main() {
                [&](int h) { pwrite(out, buf[h], blen[h], off[h]); });
   return 0;
 }
+// Speed Demon 2026 revision

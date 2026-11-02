@@ -14,3 +14,4 @@ Variants used to find the cost: with name interning disabled the run took 0.20 s
 Bug found by diffing against the reference: the empty unquoted name and the empty quoted name `""` hashed differently, giving `names_distinct` one too many. Both now hash to the same constant.
 
 Verification: `aggregates.txt` hash `d8088b1c...` equals the published seed-1 value and the Python reference output; tiny seeds 1-3 and sample seeds 2-3 match the reference, with 2-32 threads.
+# Speed Demon 2026 revision

@@ -1,6 +1,5 @@
 # Read by the board and the scoring harness.
 track = "a"
-team = "Coder Hunterz"
+team = "Hunt"
 language = "C++"
 dependency_count = 0
-# Speed Demon 2026 revision

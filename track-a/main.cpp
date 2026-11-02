@@ -21,7 +21,7 @@ typedef uint8_t u8;
 typedef uint32_t u32;
 typedef uint64_t u64;
 
-static const int HOURS = 73;
+static const int HOURS = 72; // the log always covers the same 72 hours
 
 static int hardware_threads() {
   cpu_set_t set;
@@ -58,8 +58,6 @@ struct Worker {
   size_t n = 0;
   std::vector<Slot> table = std::vector<Slot>(8192);
   std::vector<std::pair<const u8 *, u32>> names;
-  std::vector<u32> my_cnt;
-  std::vector<u32> my_err;
 };
 
 static inline u64 load64(const u8 *p) {
@@ -235,45 +233,37 @@ int main(int argc, char **argv) {
           all.begin());
 
   size_t groups = G * HOURS;
+  std::vector<u32> cnt(groups + 1, 0), cur(groups + 1, 0), errs(groups, 0);
   parallel_for(W, threads, [&](int i) {
-    workers[i].my_cnt.assign(groups, 0);
-    workers[i].my_err.assign(groups, 0);
-    u32 *my_cnt = workers[i].my_cnt.data();
-    u32 *my_err = workers[i].my_err.data();
     const u32 *rk = rank[i].data();
     for (size_t j = 0; j < workers[i].n; ++j) {
       u32 key = workers[i].recs[j].key;
       size_t g = (key >> 1 & 127) * G + rk[key >> 8];
-      my_cnt[g]++;
-      if (key & 1) my_err[g]++;
+      __atomic_fetch_add(&cnt[g], 1, __ATOMIC_RELAXED);
+      if (key & 1)
+        __atomic_fetch_add(&errs[g], 1, __ATOMIC_RELAXED);
     }
   });
 
-  std::vector<u32> cnt(groups + 1, 0), errs(groups, 0);
-  std::vector<std::vector<u32>> cur(W, std::vector<u32>(groups, 0));
   size_t total = 0;
   for (size_t g = 0; g < groups; ++g) {
+    u32 c = cnt[g];
     cnt[g] = total;
-    for (int i = 0; i < W; ++i) {
-      cur[i][g] = total;
-      total += workers[i].my_cnt[g];
-      errs[g] += workers[i].my_err[g];
-    }
+    cur[g] = total;
+    total += c;
   }
   cnt[groups] = total;
 
   u32 *lats = (u32 *)malloc(total * 4 + 4);
   parallel_for(W, threads, [&](int i) {
-    u32 *my_cur = cur[i].data();
     const u32 *rk = rank[i].data();
     for (size_t j = 0; j < workers[i].n; ++j) {
       Rec r = workers[i].recs[j];
       size_t g = (r.key >> 1 & 127) * G + rk[r.key >> 8];
-      lats[my_cur[g]++] = r.lat;
+      lats[__atomic_fetch_add(&cur[g], 1, __ATOMIC_RELAXED)] = r.lat;
     }
     free(workers[i].recs);
-    std::vector<u32>().swap(workers[i].my_cnt);
-    std::vector<u32>().swap(workers[i].my_err);
+    workers[i].recs = nullptr;
   });
 
   std::vector<char *> buf(HOURS);

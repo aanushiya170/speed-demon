@@ -151,6 +151,14 @@ static const u8 *map_file(const char *path, size_t *size) {
   return base;
 }
 
+static inline void madvise_dontneed(const void *addr, size_t len) {
+  uintptr_t start = ((uintptr_t)addr + 4095) & ~4095ull;
+  uintptr_t end = ((uintptr_t)addr + len) & ~4095ull;
+  if (end > start) {
+    madvise((void *)start, end - start, MADV_DONTNEED);
+  }
+}
+
 int main(int argc, char **argv) {
   mallopt(-8, 2);
   std::string data_dir = "/data";
@@ -213,14 +221,16 @@ int main(int argc, char **argv) {
       ++q;
     cut[i] = q ? q + 1 : rec + size;
   }
-  u64 *names = (u64 *)calloc(1u << NAME_BITS, 8);
-  u64 *seen = (u64 *)calloc(nc << (NAME_BITS - 6),
-                            8); // per country, one bit per name slot
+  u64 *names = (u64 *)mmap(nullptr, (1u << NAME_BITS) * 8, PROT_READ | PROT_WRITE,
+                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  u64 *seen = (u64 *)mmap(nullptr, (nc << (NAME_BITS - 6)) * 8, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   std::vector<std::vector<Agg>> agg(threads, std::vector<Agg>(nc));
   parallel_for(threads, threads, [&](int i) {
     std::vector<Agg> &A = agg[i];
     const u8 *p = cut[i];
     const u8 *end = cut[i + 1];
+    const u8 *last_adv = p;
     struct Pending {
       u64 hash, id, region;
       i64 cents;
@@ -260,6 +270,10 @@ int main(int argc, char **argv) {
       np = 0;
     };
     while (p < end) {
+      if (p - last_adv >= 4 * 1024 * 1024) {
+        madvise_dontneed(last_adv, p - last_adv);
+        last_adv = p;
+      }
       if (*p == 0xEF)
         p += 3; // BOM at a record start
       u64 id = digits<','>(p);
@@ -284,6 +298,9 @@ int main(int argc, char **argv) {
         flush();
     }
     flush();
+    if (end > last_adv) {
+      madvise_dontneed(last_adv, end - last_adv);
+    }
   });
 
   // ---- merge and write, countries in code order, _UNMATCHED last ----
